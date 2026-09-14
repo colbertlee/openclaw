@@ -250,7 +250,8 @@ async function runDoctorConfigPreflightOperation(
       (stateMigrationsRequested && options.migrateLegacyConfig !== false)) &&
     !snapshot.valid &&
     !skipLegacyParentConfigWrite &&
-    !shouldSkipPluginValidationForDoctorConfigPreflight() &&
+    (options.repairPrefixedConfig === true ||
+      !shouldSkipPluginValidationForDoctorConfigPreflight()) &&
     !resolveIsConfigReadOnly(process.env) &&
     !resolveFutureConfigActionBlock({ action: "normalize legacy config", snapshot })
       ? (prepared ?? planScopedConfigRepair(snapshot))
