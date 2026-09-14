@@ -13,6 +13,10 @@ import { z } from "zod";
 import { resolveConfigPath, resolveGatewayLockDir, resolveStateDir } from "../config/paths.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { getFileLockProcessStartTime, isPidAlive } from "../shared/pid-alive.js";
+import {
+  createOpenClawDatabaseMaintenanceScope,
+  type OpenClawDatabaseMaintenanceScope,
+} from "../state/openclaw-state-db-async-lifecycle.js";
 import { safeParseJsonWithSchema } from "../utils/zod-parse.js";
 import { acquireWithWait } from "./acquire-with-wait.js";
 import { resolveIdentityPathViaExistingAncestorSync } from "./boundary-path.js";
@@ -34,6 +38,7 @@ import { resolveDiagnosticProcessEnv } from "./process-env.js";
 import { tryAcquireExclusiveSqliteCoordinator } from "./sqlite-coordinator.js";
 import {
   acquireGatewayLifecycleCoordinator,
+  acquireGatewayMaintenanceCoordinator,
   StateDatabaseCoordinatorContentionError,
 } from "./state-database-coordinator.js";
 import { readWindowsProcessArgsSync } from "./windows-port-pids.js";
@@ -78,6 +83,7 @@ type GatewayLockHandle = {
   stateDir: string;
   releaseInTree: () => Promise<void>;
   release: () => Promise<void>;
+  run<T>(operation: () => T): T;
 };
 
 type GatewayLockRole = "gateway" | "agent-embedded" | "skill-workshop-apply" | "sqlite-maintenance";
@@ -417,6 +423,7 @@ export async function acquireGatewayLock(
   const deadlineMs = opts.lifecycleDeadlineMs ?? startedAt + timeoutMs;
   let waited = false;
   let stateLifecycle: ReturnType<typeof acquireGatewayLifecycleCoordinator>;
+  let resources: OpenClawDatabaseMaintenanceScope | undefined;
   try {
     stateLifecycle = await acquireWithWait({
       deadlineMs,
@@ -424,11 +431,15 @@ export async function acquireGatewayLock(
       maxPollIntervalMs: 2000,
       now,
       sleep: opts.sleep,
-      acquire: () =>
-        acquireGatewayLifecycleCoordinator({
-          databasePath,
-          busyTimeoutMs: 0,
-        }),
+      acquire: () => {
+        const options = { databasePath, busyTimeoutMs: 0 };
+        if (role === "sqlite-maintenance") {
+          const owner = acquireGatewayMaintenanceCoordinator(options);
+          resources = createOpenClawDatabaseMaintenanceScope(owner.createSchemaFenceDelegate);
+          return owner;
+        }
+        return acquireGatewayLifecycleCoordinator(options);
+      },
       shouldRetry: (error) => {
         if (
           !(error instanceof StateDatabaseCoordinatorContentionError) ||
@@ -484,8 +495,7 @@ export async function acquireGatewayLock(
     stateLifecycle.release();
     throw error;
   }
-  const shouldAcquireConfigLock = role !== "gateway" || env.OPENCLAW_ALLOW_MULTI_GATEWAY !== "1";
-  if (!shouldAcquireConfigLock) {
+  if (role === "gateway" && env.OPENCLAW_ALLOW_MULTI_GATEWAY === "1") {
     let inTreeReleased = false;
     const releaseInTree = async () => {
       if (inTreeReleased) {
@@ -496,6 +506,7 @@ export async function acquireGatewayLock(
     };
     return {
       ...stateLock,
+      run: (operation) => operation(),
       stateDir: paths.stateDir,
       stateLockPath: stateLock.lockPath,
       releaseInTree,
@@ -529,24 +540,10 @@ export async function acquireGatewayLock(
       ownerId,
     });
     if (role === "sqlite-maintenance") {
-      let storesDrained = false;
       let inTreeReleaseAttempt: Promise<void> | undefined;
       const releaseInTree = () => {
         inTreeReleaseAttempt ??= (async () => {
-          if (!storesDrained) {
-            const [
-              { closeOpenClawAgentDatabasesAsync },
-              { closeOpenClawStateDatabaseByPathAsync },
-            ] = await Promise.all([
-              import("../state/openclaw-agent-db.js"),
-              import("../state/openclaw-state-db.js"),
-            ]);
-            // Agent lease release can reopen shared state; retire both before
-            // releasing the Gateway authority retained by maintenance workers.
-            await closeOpenClawAgentDatabasesAsync(paths.stateDir);
-            await closeOpenClawStateDatabaseByPathAsync(databasePath);
-            storesDrained = true;
-          }
+          await resources?.close();
           await configLock.release();
           await stateLock.release();
         })().catch((error: unknown) => {
@@ -559,6 +556,7 @@ export async function acquireGatewayLock(
       };
       return {
         ...configLock,
+        run: (operation) => resources!.run(operation),
         stateDir: paths.stateDir,
         stateLockPath: stateLock.lockPath,
         releaseInTree,
@@ -597,6 +595,7 @@ export async function acquireGatewayLock(
     };
     return {
       ...configLock,
+      run: (operation) => operation(),
       stateDir: paths.stateDir,
       stateLockPath: stateLock.lockPath,
       releaseInTree,
@@ -644,7 +643,7 @@ async function acquireLockFile(
     stateDir: string;
     ownerId: string;
   },
-): Promise<Omit<GatewayLockHandle, "releaseInTree" | "stateDir" | "stateLockPath">> {
+): Promise<Omit<GatewayLockHandle, "releaseInTree" | "stateDir" | "stateLockPath" | "run">> {
   const timeoutMs = resolveTimerTimeoutMs(opts.timeoutMs, DEFAULT_TIMEOUT_MS, 0);
   const pollIntervalMs = resolvePositiveTimerTimeoutMs(
     opts.pollIntervalMs,
