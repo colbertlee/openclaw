@@ -20,6 +20,11 @@ import {
 import { readSessionMethodAccess } from "../lib/session-method-access.ts";
 import { normalizeAgentId, resolveUiSelectedSessionAgentId } from "../lib/sessions/session-key.ts";
 import { isTerminalAvailable } from "../lib/terminal-availability.ts";
+import {
+  debugOverlayTemplate,
+  renderPendingDebugOverlay,
+  type DebugOverlayFrameHost,
+} from "../pages/debug/debug-overlay-frame.ts";
 import type { NewSessionTarget } from "../pages/new-session/location.ts";
 import { pluginTabKey, pluginTabRefFromSearch } from "../pages/plugin/route.ts";
 import { renderPluginSurface } from "../plugins/control-ui-view.ts";
@@ -37,6 +42,7 @@ import { resolveControlUiAuthToken } from "./control-ui-auth.ts";
 import { gatewayPresentationScope } from "./gateway-presentation-scope.ts";
 import {
   isOptionalElementDefined,
+  DEBUG_OVERLAY_ELEMENT,
   KEYBOARD_SHORTCUTS_ELEMENT,
   type LazyCustomElementRequestController,
   MACOS_TITLEBAR_ELEMENT,
@@ -70,7 +76,7 @@ import { createUpdateProgressWatcher } from "./update-confirmation.ts";
 
 const EMPTY_SESSION_HAS_DRAFT = () => false;
 
-export interface ShellViewHost extends DevicePairSetupHost {
+export interface ShellViewHost extends DevicePairSetupHost, DebugOverlayFrameHost {
   readonly context: ApplicationContext<RouteId> | undefined;
   readonly runtime: ApplicationRuntime | undefined;
   readonly activeSessionKey: string;
@@ -385,7 +391,9 @@ export function renderApplicationShell(host: ShellViewHost) {
       lazyElementState?.status === "loading" &&
       lazyElementState.element === host.commandPaletteElement
         ? renderCommandPaletteLoading(() => host.lazyCustomElements.close())
-        : renderLazyElementModal(host.lazyCustomElements)
+        : lazyElementState?.element === DEBUG_OVERLAY_ELEMENT
+          ? renderPendingDebugOverlay(host, lazyElementState)
+          : renderLazyElementModal(host.lazyCustomElements)
     }
     ${
       isOptionalElementDefined(host.commandPaletteElement)
@@ -399,7 +407,7 @@ export function renderApplicationShell(host: ShellViewHost) {
           ></openclaw-command-palette>`
         : nothing
     }
-    <openclaw-debug-overlay></openclaw-debug-overlay>
+    ${isOptionalElementDefined(DEBUG_OVERLAY_ELEMENT) ? debugOverlayTemplate : nothing}
     ${
       !nativeEmbed && isOptionalElementDefined(KEYBOARD_SHORTCUTS_ELEMENT)
         ? html`<openclaw-keyboard-shortcuts-dialog
