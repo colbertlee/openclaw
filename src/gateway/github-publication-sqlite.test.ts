@@ -98,22 +98,23 @@ describe("publication SQLite materialization", () => {
       const now = Date.now();
       const clock = vi.spyOn(Date, "now").mockReturnValue(now);
       const counter = trackSqliteStatementExecutions(db, ["defer"], (sql) =>
-        /^update "github_publication_requests"/.test(sql) ? "defer" : null,
+        sql.startsWith('update "github_publication_requests"') ? "defer" : null,
       );
       try {
         deferGitHubPublicationRequests(["first", "second", "first", "absent"]);
         expect(readRows()).toEqual(
-          before.map((row) => ({
-            ...row,
-            claim_id: null,
-            run_id: null,
-            environment_id: null,
-            owner_epoch: null,
-            placement_generation: null,
-            status: "requested",
-            gateway_instance_id: null,
-            updated_at_ms: now,
-          })),
+          before.map((row) =>
+            Object.assign({}, row, {
+              claim_id: null,
+              run_id: null,
+              environment_id: null,
+              owner_epoch: null,
+              placement_generation: null,
+              status: "requested",
+              gateway_instance_id: null,
+              updated_at_ms: now,
+            }),
+          ),
         );
         expect(observer.mock.calls.map(([event]) => event)).toEqual(
           [first, second, first].map((row) => ({
