@@ -23,6 +23,18 @@ const deferredPluginMigrationSchema = z.object({
 
 export type DeferredPluginMigration = z.infer<typeof deferredPluginMigrationSchema>;
 
+export class DeferredPluginMigrationConflictError extends Error {
+  readonly pending: readonly DeferredPluginMigration[];
+
+  constructor(pending: readonly DeferredPluginMigration[]) {
+    super(
+      'Plugin migration obligations changed while Doctor was completing them. Retained inputs remain protected; run "openclaw doctor --fix" after the other repair finishes.',
+    );
+    this.name = "DeferredPluginMigrationConflictError";
+    this.pending = pending;
+  }
+}
+
 /** Missing metadata cannot release inputs already claimed by an unfinished migration. */
 export function mergeDeferredPluginMigration(
   previous: DeferredPluginMigration | undefined,
@@ -75,9 +87,7 @@ function assertPendingGeneration(
   expected: readonly DeferredPluginMigration[],
 ): void {
   if (!isDeepStrictEqual(current, expected)) {
-    throw new Error(
-      'Plugin migration obligations changed while Doctor was completing them. Retained inputs remain protected; run "openclaw doctor --fix" after the other repair finishes.',
-    );
+    throw new DeferredPluginMigrationConflictError(current);
   }
 }
 
@@ -113,9 +123,9 @@ export function recordDeferredPluginMigrations(params: {
   pending: readonly DeferredPluginMigration[];
   resolvedPluginIds?: readonly string[];
   expectedPending?: readonly DeferredPluginMigration[];
-}): void {
+}): readonly DeferredPluginMigration[] | undefined {
   if (params.pending.length === 0 && !params.resolvedPluginIds?.length) {
-    return;
+    return undefined;
   }
   const pendingById = new Map(
     params.pending.map((pending) => [
@@ -175,7 +185,7 @@ export function recordDeferredPluginMigrations(params: {
       if (deferred.length > 0) {
         invalidateSuccessfulMigrationCheckpointsInTransaction(db);
       }
-      return { deferred, resolved };
+      return { deferred, resolved, pending: pendingMigrationRecords(readMigrationRows(db)) };
     },
     { env: params.env },
     { operationLabel: "state.plugin-migration-deferral" },
@@ -195,4 +205,5 @@ export function recordDeferredPluginMigrations(params: {
       status: "completed",
     });
   }
+  return transitions.pending;
 }

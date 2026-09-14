@@ -687,6 +687,7 @@ describe("runDoctorConfigPreflight state migration", () => {
     expect(recordDeferredPluginMigrations).toHaveBeenCalledWith({
       env: acquireStartupMigrationLeaseWithWait.mock.calls[0]?.[0]?.env,
       pending: [expect.objectContaining({ pluginId: "discord" })],
+      expectedPending: [],
     });
     expect(listActiveDegradedPlugins()).toEqual([]);
     expect(recordSuccessfulStartupMigrations).not.toHaveBeenCalled();

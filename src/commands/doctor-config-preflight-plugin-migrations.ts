@@ -5,6 +5,7 @@ import { resolveConfigPath } from "../config/paths.js";
 import type { ConfigFileSnapshot } from "../config/types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
+  DeferredPluginMigrationConflictError,
   formatDeferredPluginMigration,
   mergeDeferredPluginMigration,
   readDeferredPluginMigrations,
@@ -39,12 +40,15 @@ export function createDoctorPluginMigrationPreparation(params: {
 }) {
   const previousById = new Map<string, DeferredPluginMigration>();
   let deferred: readonly DeferredPluginMigration[] = [];
+  let expectedPending: readonly DeferredPluginMigration[] = [];
+  let refreshSnapshot = false;
   let previousLoaded = false;
   const loadPrevious = (snapshot?: ConfigFileSnapshot) => {
     if (previousLoaded || !(snapshot?.exists ?? existsSync(resolveConfigPath(params.env())))) {
       return;
     }
     deferred = readDeferredPluginMigrations({ env: params.env() });
+    expectedPending = structuredClone(deferred);
     for (const entry of deferred) {
       previousById.set(entry.pluginId, entry);
     }
@@ -52,7 +56,7 @@ export function createDoctorPluginMigrationPreparation(params: {
   };
   let prepared = false;
   const completedIds = new Set<string>();
-  const reportedIds = new Set<string>();
+  const reported = new Map<string, LegacyStateMigrationStepReceipt>();
   let statelessPluginIds = new Set<string>();
   const inspectedStatelessPluginIds = new Set<string>();
   const learn = (inspection: PluginMigrationInspection | undefined) => {
@@ -103,18 +107,22 @@ export function createDoctorPluginMigrationPreparation(params: {
     return [...previousById.values()];
   };
   const reportPending = (plugin: DeferredPluginMigration) => {
-    if (reportedIds.has(plugin.pluginId)) {
+    const warning = formatDeferredPluginMigration(plugin);
+    const previous = reported.get(plugin.pluginId);
+    if (previous?.warnings[0] === warning) {
       return;
     }
-    reportedIds.add(plugin.pluginId);
-    const warning = formatDeferredPluginMigration(plugin);
     params.report({
       changes: [],
       warnings: [warning],
       warningDisposition: "recoverable",
       outcome: "deferred",
     });
-    params.recordReceipt({
+    if (previous) {
+      previous.warnings = [warning];
+      return;
+    }
+    const receipt: LegacyStateMigrationStepReceipt = {
       id: `plugin:${plugin.pluginId}`,
       phase: "final",
       source: [{ kind: "owner", id: plugin.pluginId }],
@@ -124,7 +132,43 @@ export function createDoctorPluginMigrationPreparation(params: {
       outcome: "deferred",
       changes: [],
       warnings: [warning],
-    });
+    };
+    reported.set(plugin.pluginId, receipt);
+    params.recordReceipt(receipt);
+  };
+  const persistPending = (
+    pending: readonly DeferredPluginMigration[],
+    resolvedPluginIds?: readonly string[],
+  ) => {
+    params.beforePersistentEffect();
+    try {
+      const committed = recordDeferredPluginMigrations({
+        env: params.env(),
+        pending,
+        ...(resolvedPluginIds ? { resolvedPluginIds } : {}),
+        expectedPending,
+      });
+      if (committed) {
+        expectedPending = structuredClone(committed);
+      }
+      return true;
+    } catch (error) {
+      if (!(error instanceof DeferredPluginMigrationConflictError)) {
+        throw error;
+      }
+      expectedPending = structuredClone(error.pending);
+      previousById.clear();
+      deferred = error.pending;
+      completedIds.clear();
+      statelessPluginIds.clear();
+      inspectedStatelessPluginIds.clear();
+      refreshSnapshot = true;
+      for (const plugin of deferred) {
+        previousById.set(plugin.pluginId, plugin);
+        reportPending(plugin);
+      }
+      return false;
+    }
   };
 
   return {
@@ -177,8 +221,9 @@ export function createDoctorPluginMigrationPreparation(params: {
         ),
       );
       remember();
-      params.beforePersistentEffect();
-      recordDeferredPluginMigrations({ env: params.env(), pending: [...previousById.values()] });
+      if (!persistPending([...previousById.values()])) {
+        return;
+      }
       for (const plugin of deferred) {
         reportPending(plugin);
       }
@@ -223,10 +268,11 @@ export function createDoctorPluginMigrationPreparation(params: {
               }),
         );
       if (resolvedPluginIds.length === 0 && pending.length === 0) {
-        return false;
+        return refreshSnapshot;
       }
-      params.beforePersistentEffect();
-      recordDeferredPluginMigrations({ env: params.env(), pending, resolvedPluginIds });
+      if (!persistPending(pending, resolvedPluginIds)) {
+        return true;
+      }
       for (const pluginId of resolvedPluginIds) {
         previousById.delete(pluginId);
       }
@@ -234,7 +280,7 @@ export function createDoctorPluginMigrationPreparation(params: {
         previousById.set(plugin.pluginId, plugin);
         reportPending(plugin);
       }
-      return resolvedPluginIds.length > 0;
+      return refreshSnapshot || resolvedPluginIds.length > 0;
     },
   };
 }

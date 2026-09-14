@@ -13,6 +13,7 @@ async function installMigrationFixture(params: {
   source: string;
   migrated: string;
   stale?: boolean;
+  phase?: "after-session-repair";
 }) {
   await fs.mkdir(params.root, { recursive: true });
   await fs.writeFile(
@@ -29,7 +30,12 @@ async function installMigrationFixture(params: {
     JSON.stringify({
       id: params.pluginId,
       configSchema: { type: "object", properties: {}, additionalProperties: false },
-      doctorContract: { configRepair: true, stateMigrations: [{ id: "legacy-binding" }] },
+      doctorContract: {
+        configRepair: true,
+        stateMigrations: [
+          { id: "legacy-binding", ...(params.phase ? { phase: params.phase } : {}) },
+        ],
+      },
       configContracts: { compatibilityMigrationPaths: ["legacyFixture"] },
     }),
   );
@@ -58,6 +64,7 @@ async function installMigrationFixture(params: {
       },
       stateMigrations: [{
       id: "legacy-binding", label: "Fixture legacy binding",
+      ${params.phase ? `phase: ${JSON.stringify(params.phase)},` : ""}
       detectLegacyState: () => {
         ${params.stale ? 'throw new Error("Stale detector executed before convergence");' : `return fs.existsSync(${JSON.stringify(params.source)}) ? { preview: ["Import binding"] } : null;`}
       },
@@ -144,6 +151,80 @@ async function installStatelessFixture(
 }
 
 describe("configured plugin migration deferral", () => {
+  it("preserves a newer migration obligation after an ordinary Doctor observed a stateless plugin", async () => {
+    await withDoctorConfigPreflightHome(async (home) => {
+      const configPath = path.join(home, ".openclaw", "openclaw.json");
+      const pluginRoot = path.join(home, "upgraded-plugin");
+      const source = path.join(home, "legacy-binding.json");
+      const migrated = path.join(home, "migrated-binding.json");
+      const pluginId = "upgraded-fixture";
+      const config = {
+        gateway: { mode: "local" },
+        plugins: {
+          allow: [pluginId],
+          entries: { [pluginId]: { enabled: true, config: { legacyBinding: source } } },
+        },
+      };
+      await fs.mkdir(path.dirname(configPath), { recursive: true });
+      await fs.writeFile(configPath, JSON.stringify(config));
+      await fs.writeFile(source, '{"binding":"retained"}\n');
+      const options = {
+        migrateLegacyConfig: false,
+        invalidConfigNote: false,
+        doctorOnlyStateMigrations: true,
+        repairPrefixedConfig: true,
+      } as const;
+      await withEnvAsync({ OPENCLAW_DISABLE_BUNDLED_PLUGINS: "1" }, async () => {
+        await runDoctorConfigPreflight(options);
+        expect(readDeferredPluginMigrations()).toEqual([expect.objectContaining({ pluginId })]);
+        await installStatelessFixture(pluginRoot, pluginId);
+        await fs.writeFile(
+          configPath,
+          JSON.stringify({
+            ...config,
+            plugins: { ...config.plugins, load: { paths: [pluginRoot] } },
+          }),
+        );
+        let upgraded = false;
+        const result = await runDoctorConfigPreflight({
+          ...options,
+          measure: async (name, run) => {
+            const measured = await run();
+            if (name === "doctor.config-preflight.legacy-state-migrations" && !upgraded) {
+              upgraded = true;
+              await installMigrationFixture({
+                root: pluginRoot,
+                pluginId,
+                source,
+                migrated,
+                phase: "after-session-repair",
+              });
+              await runDoctorConfigPreflight(options);
+              expect(readDeferredPluginMigrations()).toEqual([
+                expect.objectContaining({ pluginId, requiresStateMigration: true }),
+              ]);
+            }
+            return measured;
+          },
+        });
+        expect(upgraded).toBe(true);
+        expect(readDeferredPluginMigrations()).toEqual([
+          expect.objectContaining({ pluginId, requiresStateMigration: true }),
+        ]);
+        expect(result.snapshot.valid).toBe(true);
+        expect(result.stateMigrationStepReceipts).toContainEqual(
+          expect.objectContaining({ id: `plugin:${pluginId}`, outcome: "deferred" }),
+        );
+        expect(JSON.parse(await fs.readFile(configPath, "utf8"))).toHaveProperty(
+          `plugins.entries.${pluginId}.config.legacyBinding`,
+          source,
+        );
+        expect(await fs.readFile(source, "utf8")).toBe('{"binding":"retained"}\n');
+        await expect(fs.stat(migrated)).rejects.toMatchObject({ code: "ENOENT" });
+      });
+    });
+  });
+
   it.each([false, true])(
     "honors the allowlist for ambient channel credentials (Discord allowed: %s)",
     async (allowDiscord) => {

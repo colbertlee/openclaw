@@ -139,7 +139,11 @@ const runWithPluginMetadataSnapshot = vi.hoisted(() =>
 );
 const note = vi.hoisted(() => vi.fn());
 const pendingPluginMigrations = vi.hoisted(() => vi.fn((): DeferredPluginMigration[] => []));
-const recordDeferredPluginMigrations = vi.hoisted(() => vi.fn());
+const recordDeferredPluginMigrations = vi.hoisted(() =>
+  vi.fn<typeof import("../infra/deferred-plugin-migrations.js").recordDeferredPluginMigrations>(
+    ({ pending }) => pending,
+  ),
+);
 const inspectPluginMigrationAvailability = vi.hoisted(() =>
   vi.fn<
     typeof import("./doctor/shared/plugin-migration-availability.js").inspectPluginMigrationAvailability
