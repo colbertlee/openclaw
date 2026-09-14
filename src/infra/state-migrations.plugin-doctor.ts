@@ -367,6 +367,10 @@ export async function runPostSessionPluginDoctorStateRepairs(params: {
   env: NodeJS.ProcessEnv;
   maintenanceAuthority?: { assertCurrent(): void };
   plannedActions?: readonly PlannedPluginDoctorAction[];
+  beforeCompletion?: (
+    completedPluginIds: readonly string[],
+    assertCurrent: () => void,
+  ) => Promise<void>;
 }): Promise<MigrationMessages> {
   const stateDir = resolveStateDir(params.env);
   const input: PluginDoctorInput = {
@@ -424,6 +428,17 @@ export async function runPostSessionPluginDoctorStateRepairs(params: {
     return run();
   }
   maintenance.assertCurrent();
+  const {
+    assertDeferredPluginMigrationsCurrent,
+    readDeferredPluginMigrations,
+    recordDeferredPluginMigrations,
+  } = await import("./deferred-plugin-migrations.js");
+  maintenance.assertCurrent();
+  const expectedPending = readDeferredPluginMigrations({ env: params.env });
+  const assertCompletionCurrent = () => {
+    maintenance.assertCurrent();
+    assertDeferredPluginMigrationsCurrent({ env: params.env, expectedPending });
+  };
   let completed: MigrationMessages = { changes: [], warnings: [] };
   try {
     const result = await withAgentDatabaseMaintenanceLease(
@@ -460,13 +475,14 @@ export async function runPostSessionPluginDoctorStateRepairs(params: {
         }),
     );
     if (result.completedPluginIds?.length) {
-      maintenance.assertCurrent();
-      const { recordDeferredPluginMigrations } = await import("./deferred-plugin-migrations.js");
-      maintenance.assertCurrent();
+      assertCompletionCurrent();
+      await params.beforeCompletion?.(result.completedPluginIds, assertCompletionCurrent);
+      assertCompletionCurrent();
       recordDeferredPluginMigrations({
         env: params.env,
         pending: [],
         resolvedPluginIds: result.completedPluginIds,
+        expectedPending,
       });
     }
     return result;

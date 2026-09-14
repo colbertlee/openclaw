@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { deleteSessionEntryLifecycle } from "../config/sessions/session-accessor.js";
 import {
   loadExactSessionEntry,
@@ -9,17 +9,28 @@ import {
 } from "../config/sessions/session-accessor.sqlite-entry.js";
 import { assertSessionStoreMigrationComplete } from "../config/sessions/startup-migration.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import { recordDeferredPluginMigrations } from "../infra/deferred-plugin-migrations.js";
+import {
+  readDeferredPluginMigrations,
+  recordDeferredPluginMigrations,
+} from "../infra/deferred-plugin-migrations.js";
+import * as directoryDurability from "../infra/directory-durability.js";
 import { createPluginDoctorStateMigrationContext } from "../infra/state-migrations.plugin-doctor-context.js";
 import type { PluginDoctorStateMigration } from "../plugins/doctor-contract-module.js";
-import { loadBundledPluginPublicArtifactModuleSync } from "../plugins/public-surface-loader.js";
 import { closeOpenClawAgentDatabasesForTest } from "../state/openclaw-agent-db.js";
 import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
+import { loadBundledPluginFacade } from "../test-utils/bundled-plugin-public-surface.js";
 import {
   withOpenClawTestState,
   type OpenClawTestState,
 } from "../test-utils/openclaw-test-state.js";
+import {
+  listSessionSqliteMigrationManifestPaths,
+  readSessionSqliteMigrationManifest,
+} from "./doctor-session-sqlite-migration-run.js";
 import { runDoctorSessionSqlite } from "./doctor-session-sqlite.js";
+import { noteSessionTranscriptHealth } from "./doctor-session-transcripts.js";
+
+afterEach(() => vi.restoreAllMocks());
 
 function seed(
   state: OpenClawTestState,
@@ -103,6 +114,199 @@ function seed(
 }
 
 describe("session sources needed by deferred plugin migrations", () => {
+  it.each([
+    { changeSource: false, siblingPending: false, pendingChange: "none" },
+    { changeSource: true, siblingPending: false, pendingChange: "none" },
+    { changeSource: false, siblingPending: true, pendingChange: "none" },
+    { changeSource: false, siblingPending: false, pendingChange: "plugin" },
+    { changeSource: false, siblingPending: false, pendingChange: "publication" },
+  ])(
+    "settles a retained source in the same Doctor after late plugin completion (source changed: $changeSource, sibling pending: $siblingPending, pending change: $pendingChange)",
+    async ({ changeSource, siblingPending, pendingChange }) => {
+      await withOpenClawTestState({ label: "deferred-plugin-late-settlement" }, async (state) => {
+        const { cfg: seededConfig, storePath, originals, scope } = seed(state);
+        if (siblingPending) {
+          recordDeferredPluginMigrations({
+            env: state.env,
+            pending: [
+              {
+                pluginId: "waiting-plugin",
+                reason: "Another plugin still needs the original session sources.",
+                command: "openclaw doctor --fix",
+              },
+            ],
+          });
+        }
+        await runDoctorSessionSqlite({
+          cfg: seededConfig,
+          env: state.env,
+          allAgents: true,
+          mode: "import",
+        });
+        await upsertSessionEntryCore(
+          { ...scope, sessionKey: "agent:main:kept" },
+          { label: "changed after import" },
+        );
+        await deleteSessionEntryLifecycle({
+          ...scope,
+          target: { canonicalKey: "agent:main:deleted", storeKeys: ["agent:main:deleted"] },
+          archiveTranscript: false,
+          deleteTranscriptWithoutArchive: true,
+        });
+        const pluginRoot = state.path("fixture-plugin");
+        const marker = state.path("late-migration-pending");
+        const newHistory = path.join(path.dirname(storePath), "new-history.jsonl");
+        const newHistoryBytes = '{"type":"session","version":3,"id":"new-history"}\n';
+        fs.mkdirSync(pluginRoot);
+        fs.writeFileSync(marker, "pending");
+        fs.writeFileSync(
+          path.join(pluginRoot, "package.json"),
+          JSON.stringify({
+            name: "@example/fixture-plugin",
+            version: "1.0.0",
+            openclaw: { extensions: ["./index.cjs"] },
+          }),
+        );
+        fs.writeFileSync(path.join(pluginRoot, "index.cjs"), "module.exports = {};\n");
+        fs.writeFileSync(
+          path.join(pluginRoot, "openclaw.plugin.json"),
+          JSON.stringify({
+            id: "fixture-plugin",
+            configSchema: { type: "object", properties: {}, additionalProperties: false },
+            doctorContract: {
+              stateMigrations: [
+                { id: "late-state", phase: "after-session-repair", doctorOnly: true },
+              ],
+            },
+          }),
+        );
+        fs.writeFileSync(
+          path.join(pluginRoot, "doctor-contract-api.cjs"),
+          `const fs = require("node:fs");
+          module.exports = { stateMigrations: [{
+            id: "late-state", label: "Late fixture state", phase: "after-session-repair", doctorOnly: true,
+            detectLegacyState: () => fs.existsSync(${JSON.stringify(marker)}) ? { preview: ["Consume retained fixture state"] } : null,
+            migrateLegacyState: () => {
+              fs.writeFileSync(${JSON.stringify(newHistory)}, ${JSON.stringify(newHistoryBytes)});
+              ${changeSource ? `fs.appendFileSync(${JSON.stringify(storePath)}, "\\n");` : ""}
+              fs.unlinkSync(${JSON.stringify(marker)});
+              return { changes: ["Consumed retained fixture state"], warnings: [] };
+            },
+          }] };\n`,
+        );
+        const cfg: OpenClawConfig = {
+          ...seededConfig,
+          plugins: {
+            allow: ["fixture-plugin"],
+            entries: { "fixture-plugin": { enabled: true } },
+            load: { paths: [pluginRoot] },
+          },
+        };
+        let pendingChanged = false;
+        const changePending = () => {
+          pendingChanged = true;
+          recordDeferredPluginMigrations({
+            env: state.env,
+            pending: [
+              {
+                pluginId: pendingChange === "plugin" ? "fixture-plugin" : "new-plugin",
+                reason: "A concurrent Doctor found additional migration work.",
+                command: "openclaw doctor --fix",
+                requiresStateMigration: true,
+              },
+            ],
+          });
+        };
+        if (pendingChange === "plugin") {
+          const unlink = fs.unlinkSync;
+          vi.spyOn(fs, "unlinkSync").mockImplementation((file) => {
+            unlink(file);
+            if (file === marker) {
+              changePending();
+            }
+          });
+        } else if (pendingChange === "publication") {
+          const publish = directoryDurability.publishFileExclusive;
+          vi.spyOn(directoryDurability, "publishFileExclusive").mockImplementation(
+            async (options) => {
+              const result = await publish(options);
+              if (
+                !pendingChanged &&
+                originals.has(options.sourcePath) &&
+                options.sourcePath.endsWith(".jsonl")
+              ) {
+                changePending();
+              }
+              return result;
+            },
+          );
+        }
+
+        await noteSessionTranscriptHealth({ cfg, env: state.env, shouldRepair: true });
+        expect(fs.existsSync(marker)).toBe(false);
+        expect(fs.readFileSync(newHistory, "utf8")).toBe(newHistoryBytes);
+        expect(
+          loadExactSessionEntry({ ...scope, sessionKey: "agent:main:kept" })?.entry.label,
+        ).toBe("changed after import");
+        expect(
+          loadExactSessionEntry({ ...scope, sessionKey: "agent:main:deleted" }),
+        ).toBeUndefined();
+        if (pendingChange !== "none") {
+          expect(pendingChanged).toBe(true);
+          const pending = readDeferredPluginMigrations({ env: state.env });
+          expect(pending.map((plugin) => plugin.pluginId)).toEqual(
+            pendingChange === "plugin" ? ["fixture-plugin"] : ["fixture-plugin", "new-plugin"],
+          );
+          expect(pending).toContainEqual(
+            expect.objectContaining({
+              pluginId: pendingChange === "plugin" ? "fixture-plugin" : "new-plugin",
+              requiresStateMigration: true,
+            }),
+          );
+          for (const [file, bytes] of originals) {
+            expect(fs.readFileSync(file)).toEqual(bytes);
+          }
+        } else if (changeSource) {
+          expect(() => assertSessionStoreMigrationComplete({ cfg, env: state.env })).toThrow(
+            "Retained session migration source changed",
+          );
+          expect(readDeferredPluginMigrations({ env: state.env })).toEqual([
+            expect.objectContaining({ pluginId: "fixture-plugin" }),
+          ]);
+          expect(fs.readFileSync(storePath, "utf8")).toBe(
+            originals.get(storePath)?.toString() + "\n",
+          );
+        } else if (siblingPending) {
+          expect(() => assertSessionStoreMigrationComplete({ cfg, env: state.env })).not.toThrow();
+          expect(readDeferredPluginMigrations({ env: state.env })).toEqual([
+            expect.objectContaining({ pluginId: "waiting-plugin" }),
+          ]);
+          for (const [file, bytes] of originals) {
+            expect(fs.readFileSync(file)).toEqual(bytes);
+          }
+        } else {
+          expect(() => assertSessionStoreMigrationComplete({ cfg, env: state.env })).not.toThrow();
+          expect(readDeferredPluginMigrations({ env: state.env })).toEqual([]);
+          expect(fs.existsSync(storePath)).toBe(false);
+          const archived = listSessionSqliteMigrationManifestPaths(state.env)
+            .map((manifestPath) => readSessionSqliteMigrationManifest(manifestPath))
+            .flatMap((manifest) => manifest?.targets ?? [])
+            .filter((target) =>
+              target.completedMoves.some((move) => move.sourcePath === storePath),
+            );
+          expect(archived).toEqual([
+            expect.objectContaining({ validationBeforeArchive: "passed" }),
+          ]);
+          for (const file of originals.keys()) {
+            if (file.endsWith(".jsonl")) {
+              expect(fs.existsSync(file)).toBe(false);
+            }
+          }
+        }
+      });
+    },
+  );
+
   it.each(["external", "default", "legacy-root"] as const)(
     "verifies canonical import and retains %s originals until resolution without replay",
     async (layout) => {
@@ -198,10 +402,10 @@ describe("session sources needed by deferred plugin migrations", () => {
 });
 
 describe("resumed Codex session binding migration", () => {
-  function migration() {
-    const contract = loadBundledPluginPublicArtifactModuleSync<{
+  async function migration() {
+    const contract = await loadBundledPluginFacade<{
       stateMigrations: PluginDoctorStateMigration[];
-    }>({ dirName: "codex", artifactBasename: "doctor-contract-api.js" });
+    }>({ pluginId: "codex", artifactBasename: "doctor-contract-api.js" });
     const sidecars = contract.stateMigrations.find(
       (entry) => entry.id === "codex-app-server-sidecars-to-plugin-state",
     );
@@ -267,7 +471,7 @@ describe("resumed Codex session binding migration", () => {
           oauthDir: state.statePath("oauth"),
           context: migrationContext,
         };
-        const result = await migration().migrateLegacyState(params);
+        const result = await (await migration()).migrateLegacyState(params);
         expect(result.warnings).toEqual([]);
         if (timing === "during") {
           expect(deletedDuringMigration).toBe(true);
@@ -304,7 +508,7 @@ describe("resumed Codex session binding migration", () => {
             expect(fs.existsSync(file)).toBe(false);
           }
         }
-        expect(await migration().detectLegacyState(params)).toBeNull();
+        expect(await (await migration()).detectLegacyState(params)).toBeNull();
       });
     },
   );
@@ -342,7 +546,9 @@ describe("resumed Codex session binding migration", () => {
           config: cfg,
           env: state.env,
         });
-        const result = await migration().migrateLegacyState({
+        const result = await (
+          await migration()
+        ).migrateLegacyState({
           config: cfg,
           env: state.env,
           stateDir: state.stateDir,
@@ -379,7 +585,9 @@ describe("resumed Codex session binding migration", () => {
         config: cfg,
         env: state.env,
       });
-      const result = await migration().migrateLegacyState({
+      const result = await (
+        await migration()
+      ).migrateLegacyState({
         config: cfg,
         env: state.env,
         stateDir: state.stateDir,

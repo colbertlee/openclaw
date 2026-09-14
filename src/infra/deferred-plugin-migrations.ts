@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { withExistingOpenClawStateDatabaseArtifactPreservingReadOnly } from "../state/openclaw-state-db-readonly.js";
@@ -63,6 +64,23 @@ function readMigrationRows(database: DatabaseSync) {
   ).rows;
 }
 
+function pendingMigrationRecords(rows: ReturnType<typeof readMigrationRows>) {
+  return rows
+    .filter((row) => row.status === "pending")
+    .map((row) => deferredPluginMigrationSchema.parse(JSON.parse(row.report_json)));
+}
+
+function assertPendingGeneration(
+  current: readonly DeferredPluginMigration[],
+  expected: readonly DeferredPluginMigration[],
+): void {
+  if (!isDeepStrictEqual(current, expected)) {
+    throw new Error(
+      'Plugin migration obligations changed while Doctor was completing them. Retained inputs remain protected; run "openclaw doctor --fix" after the other repair finishes.',
+    );
+  }
+}
+
 export function readDeferredPluginMigrations(
   options: { env?: NodeJS.ProcessEnv } = {},
 ): readonly DeferredPluginMigration[] {
@@ -71,11 +89,17 @@ export function readDeferredPluginMigrations(
       if (!tableExists(db, "migration_runs")) {
         return [];
       }
-      return readMigrationRows(db)
-        .filter((row) => row.status === "pending")
-        .map((row) => deferredPluginMigrationSchema.parse(JSON.parse(row.report_json)));
+      return pendingMigrationRecords(readMigrationRows(db));
     }, options) ?? []
   );
+}
+
+/** Bind asynchronous settlement to the same pending records, including newly added owners. */
+export function assertDeferredPluginMigrationsCurrent(params: {
+  env?: NodeJS.ProcessEnv;
+  expectedPending: readonly DeferredPluginMigration[];
+}): void {
+  assertPendingGeneration(readDeferredPluginMigrations(params), params.expectedPending);
 }
 
 export function formatDeferredPluginMigration(pending: DeferredPluginMigration): string {
@@ -88,6 +112,7 @@ export function recordDeferredPluginMigrations(params: {
   env?: NodeJS.ProcessEnv;
   pending: readonly DeferredPluginMigration[];
   resolvedPluginIds?: readonly string[];
+  expectedPending?: readonly DeferredPluginMigration[];
 }): void {
   if (params.pending.length === 0 && !params.resolvedPluginIds?.length) {
     return;
@@ -100,7 +125,11 @@ export function recordDeferredPluginMigrations(params: {
   );
   const transitions = runOpenClawStateWriteTransaction(
     ({ db }) => {
-      const rows = new Map(readMigrationRows(db).map((row) => [row.id, row]));
+      const currentRows = readMigrationRows(db);
+      if (params.expectedPending) {
+        assertPendingGeneration(pendingMigrationRecords(currentRows), params.expectedPending);
+      }
+      const rows = new Map(currentRows.map((row) => [row.id, row]));
       const deferred: DeferredPluginMigration[] = [];
       const resolved: string[] = [];
       const now = Date.now();

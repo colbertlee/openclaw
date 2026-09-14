@@ -49,6 +49,45 @@ describe("deferred configured-plugin migrations", () => {
     expect(fs.existsSync(stateDir)).toBe(false);
   });
 
+  it.each(["identical", "stronger", "additional"] as const)(
+    "resolves only the captured pending generation after an %s report",
+    (change) => {
+      const { env } = fixture();
+      const pending = {
+        pluginId: "fixture-plugin",
+        reason: "The configured plugin is not installed.",
+        command: "openclaw doctor --fix",
+      };
+      recordDeferredPluginMigrations({ env, pending: [pending] });
+      const expectedPending = readDeferredPluginMigrations({ env });
+      recordDeferredPluginMigrations({
+        env,
+        pending: [
+          change === "stronger"
+            ? { ...pending, requiresStateMigration: true }
+            : change === "additional"
+              ? { ...pending, pluginId: "new-plugin" }
+              : pending,
+        ],
+      });
+      const before = readDeferredPluginMigrations({ env });
+      const complete = () =>
+        recordDeferredPluginMigrations({
+          env,
+          pending: [],
+          resolvedPluginIds: [pending.pluginId],
+          expectedPending,
+        });
+      if (change === "identical") {
+        expect(complete).not.toThrow();
+        expect(readDeferredPluginMigrations({ env })).toEqual([]);
+      } else {
+        expect(complete).toThrow("Plugin migration obligations changed");
+        expect(readDeferredPluginMigrations({ env })).toEqual(before);
+      }
+    },
+  );
+
   it("invalidates successful checkpoints until deferred work completes and is certified again", () => {
     const { env } = fixture();
     const checkpoint = {

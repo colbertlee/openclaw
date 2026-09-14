@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { setImmediate } from "node:timers/promises";
+import { isDeepStrictEqual } from "node:util";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { tryResolveDefaultAgentId } from "../agents/agent-scope.js";
 import { getRuntimeConfig } from "../config/config.js";
@@ -97,6 +98,7 @@ import {
 import {
   assertDoctorSqliteMaintenancePathsNotAliased,
   isDestructiveDoctorSessionSqliteMode,
+  type DoctorSqliteMaintenanceAuthority,
 } from "./doctor-sqlite-maintenance-lock.js";
 export type {
   DoctorSessionSqliteOptions,
@@ -113,6 +115,15 @@ type LegacyArchiveTarget = {
   deferredPluginIds: string[];
   retainedImportVerified: boolean;
 };
+
+const retainedArchivePlans = new WeakMap<
+  DoctorSessionSqliteReport,
+  {
+    cfg: OpenClawConfig;
+    env: NodeJS.ProcessEnv;
+    owners: Array<{ owner: LegacyArchiveTarget; receipt: DeferredPluginSessionImport }>;
+  }
+>();
 
 const SESSION_IMPORT_BATCH_SIZE = 256;
 
@@ -228,7 +239,133 @@ export async function runDoctorSessionSqlite(
     }
     writeSessionSqliteMigrationManifest(activeRun);
   }
-  return summarizeDoctorSessionSqliteReport(options.mode, reports, activeRun);
+  const report = summarizeDoctorSessionSqliteReport(options.mode, reports, activeRun);
+  if (activeRun) {
+    const owners = archiveTargets
+      .filter((owner) => owner.retainedImportVerified && owner.deferredPluginIds.length > 0)
+      .map((owner) => {
+        const receipt = readDeferredPluginSessionImport({ target: owner.target, env });
+        if (!receipt) {
+          throw new Error("Verified retained session import receipt is missing.");
+        }
+        return { owner, receipt };
+      });
+    if (owners.length > 0) {
+      retainedArchivePlans.set(report, { cfg, env: { ...env }, owners });
+    }
+  }
+  return report;
+}
+
+/** Retire only this import's verified originals before the last plugin obligation clears. */
+export async function settleRetainedDoctorSessionSources(
+  report: DoctorSessionSqliteReport,
+  completedPluginIds: readonly string[],
+  authority: DoctorSqliteMaintenanceAuthority,
+): Promise<void> {
+  const plan = retainedArchivePlans.get(report);
+  if (!plan) {
+    return;
+  }
+  authority.assertCurrent();
+  retainedArchivePlans.delete(report);
+  const completed = new Set(completedPluginIds);
+  const pending = readDeferredPluginMigrations({ env: plan.env }).filter(
+    (plugin) => !completed.has(plugin.pluginId),
+  );
+  if (pending.length > 0) {
+    return;
+  }
+  const assertCurrent = () => authority.assertCurrent();
+  const verifyImports = () => {
+    assertCurrent();
+    for (const { owner, receipt } of plan.owners) {
+      const current = readDeferredPluginSessionImport({ target: owner.target, env: plan.env });
+      if (!current || !isDeepStrictEqual(current, receipt)) {
+        throw new Error("Verified retained session import receipt changed before settlement.");
+      }
+    }
+  };
+  const owners = plan.owners.map(({ owner }) => ({
+    ...owner,
+    deferredPluginIds: [],
+    report: {
+      ...owner.report,
+      archivedLegacyStoreFiles: [...(owner.report.archivedLegacyStoreFiles ?? [])],
+      archivedTranscriptFiles: [...owner.report.archivedTranscriptFiles],
+      archivedUnreferencedJsonlFiles: [...owner.report.archivedUnreferencedJsonlFiles],
+      issues: owner.report.issues.filter(
+        (issue) => issue.code !== "plugin_migration_source_retained",
+      ),
+    },
+  }));
+  let activeRun: ActiveSessionSqliteMigrationRun | undefined;
+  let failure: Error | undefined;
+  try {
+    verifyImports();
+    const coverage = gatherLegacyArchiveCoverage(
+      plan.cfg,
+      plan.env,
+      owners.map(({ target }) => target),
+    );
+    verifyImports();
+    const targets = owners.map(({ target }) => target);
+    assertDoctorSqliteMaintenancePathsNotAliased(
+      "retained session source settlement",
+      resolveDoctorSessionSqliteMaintenancePaths(targets),
+      resolveDoctorSessionSqliteMaintenanceRoots(targets, plan.env),
+    );
+    assertCurrent();
+    activeRun = createSessionSqliteMigrationRun(plan.env, targets);
+    for (const owner of owners) {
+      updateMigrationManifestTarget(activeRun, owner.target, owner.report.issues, {
+        validationBeforeArchive: "passed",
+      });
+    }
+    const capturedSources = new Set(
+      plan.owners.flatMap(({ receipt }) => receipt.sources.map((source) => source.path)),
+    );
+    await archiveLegacyArtifacts(owners, coverage, activeRun, assertCurrent, capturedSources);
+    verifyImports();
+    const transcriptIssue = owners.flatMap((owner) => owner.report.issues)[0];
+    if (transcriptIssue) {
+      throw new Error(transcriptIssue.message);
+    }
+    await archiveImportedLegacySessionStores(owners, activeRun, coverage, assertCurrent);
+    verifyImports();
+    const issue = owners.flatMap((owner) => owner.report.issues)[0];
+    if (issue || owners.some((owner) => fs.existsSync(owner.target.storePath))) {
+      throw new Error(issue?.message ?? "Retained session sources could not be archived.");
+    }
+  } catch (error) {
+    failure = error instanceof Error ? error : new Error(formatErrorMessage(error));
+    for (const [index, owner] of owners.entries()) {
+      owner.report.issues.push(
+        ...plan.owners[index]!.owner.report.issues.filter(
+          (issue) => issue.code === "plugin_migration_source_retained",
+        ),
+        { code: "retained_plugin_source_settlement_failed", message: formatErrorMessage(error) },
+      );
+    }
+  }
+  for (const [index, owner] of owners.entries()) {
+    Object.assign(plan.owners[index]!.owner.report, owner.report);
+  }
+  if (activeRun) {
+    assertCurrent();
+    for (const owner of owners) {
+      updateMigrationManifestTarget(activeRun, owner.target, owner.report.issues);
+    }
+    activeRun.manifest.completedAt = new Date().toISOString();
+    if (failure) {
+      activeRun.manifest.failedAt = activeRun.manifest.completedAt;
+    }
+    writeSessionSqliteMigrationManifest(activeRun);
+  }
+  Object.assign(report, summarizeDoctorSessionSqliteReport(report.mode, report.targets, activeRun));
+  if (failure) {
+    throw failure;
+  }
 }
 
 /** Called only under the public maintenance lock, before its strict alias recheck. */
@@ -1197,6 +1334,8 @@ async function archiveLegacyArtifacts(
   owners: readonly LegacyArchiveTarget[],
   coverage: ReturnType<typeof gatherLegacyArchiveCoverage>,
   activeRun: ActiveSessionSqliteMigrationRun,
+  assertCurrent?: () => void,
+  capturedSources?: ReadonlySet<string>,
 ): Promise<void> {
   const {
     selectedStorePaths,
@@ -1306,6 +1445,7 @@ async function archiveLegacyArtifacts(
         first.record.sessionKey,
         source,
         reservedArchivePaths,
+        capturedSources,
       );
       // Same-session aliases reuse the actual importer evidence only within their validated target.
       const imports = refs.map(({ owner, record }) =>
@@ -1400,6 +1540,9 @@ async function archiveLegacyArtifacts(
       ...referencedPaths,
       ...planned.keys(),
     ])) {
+      if (capturedSources && !capturedSources.has(source)) {
+        continue;
+      }
       try {
         const move = planSessionJsonlArchiveMove({
           archiveKey: "archive-tier",
@@ -1429,6 +1572,7 @@ async function archiveLegacyArtifacts(
       .map(({ move, owners: refs }) => Object.assign({}, move, { sessionKey: refs.get(owner) }));
   // Every referencing target gets its own session key and shared mapping before publication.
   for (const owner of owners) {
+    assertCurrent?.();
     recordPlannedMigrationMoves(activeRun, owner.target, movesForOwner(owner));
   }
   const completed = new Set<string>();
@@ -1437,7 +1581,18 @@ async function archiveLegacyArtifacts(
       for (const owner of referencingOwners.keys()) {
         assertSafeSessionSqliteMigrationMove(move, owner.target);
       }
-      await moveMigrationArtifact(move.sourcePath, move.archivePath, move.artifact!.identity);
+      assertCurrent?.();
+      await moveMigrationArtifact(
+        move.sourcePath,
+        move.archivePath,
+        move.artifact!.identity,
+        assertCurrent
+          ? () => {
+              assertCurrent();
+            }
+          : undefined,
+      );
+      assertCurrent?.();
       completed.add(move.sourcePath);
       const report = [...referencingOwners.keys()][0]!.report;
       (move.kind === "unreferenced-jsonl"
@@ -1451,6 +1606,7 @@ async function archiveLegacyArtifacts(
     }
   }
   for (const owner of owners) {
+    assertCurrent?.();
     recordCompletedMigrationMoves(
       activeRun,
       owner.target,
@@ -1466,6 +1622,7 @@ async function archiveImportedLegacySessionStores(
   owners: readonly LegacyArchiveTarget[],
   activeRun: ActiveSessionSqliteMigrationRun,
   coverage: ReturnType<typeof gatherLegacyArchiveCoverage>,
+  assertCurrent?: () => void,
 ): Promise<void> {
   const byStore = new Map<string, LegacyArchiveTarget[]>();
   for (const owner of owners) {
@@ -1473,6 +1630,7 @@ async function archiveImportedLegacySessionStores(
     byStore.set(storePath, [...(byStore.get(storePath) ?? []), owner]);
   }
   for (const [storePath, entries] of byStore) {
+    assertCurrent?.();
     // A historical-only target may never have had an index; losing an admitted index is a failure.
     if (!coverage.indexIdentities.has(storePath) && !fs.existsSync(storePath)) {
       continue;
@@ -1517,11 +1675,23 @@ async function archiveImportedLegacySessionStores(
         disposal: { state: "retained" },
       };
       for (const { target } of entries) {
+        assertCurrent?.();
         recordPlannedMigrationMoves(activeRun, target, [move]);
         assertSafeSessionSqliteMigrationMove(move, target);
       }
       publicationPlanned = true;
-      await moveMigrationArtifact(move.sourcePath, move.archivePath, expected);
+      assertCurrent?.();
+      await moveMigrationArtifact(
+        move.sourcePath,
+        move.archivePath,
+        expected,
+        assertCurrent
+          ? () => {
+              assertCurrent();
+            }
+          : undefined,
+      );
+      assertCurrent?.();
       for (const { target } of entries) {
         recordCompletedMigrationMoves(activeRun, target, [move]);
       }
@@ -1535,6 +1705,7 @@ async function archiveImportedLegacySessionStores(
         // A recorded index plan already protects its dependencies and can reconcile on retry.
         // Earlier failures have no artifact record, so retain that failure on the owner instead.
         if (!publicationPlanned) {
+          assertCurrent?.();
           updateMigrationManifestTarget(activeRun, target, report.issues);
         }
       }
@@ -1609,9 +1780,13 @@ function planImportedTranscriptArtifactsToArchive(
   sessionKey: string,
   transcriptPath: string,
   reservedArchivePaths: Set<string>,
+  capturedSources?: ReadonlySet<string>,
 ): SessionSqliteMigrationMove[] {
   const moves: SessionSqliteMigrationMove[] = [];
   const addMove = (sourcePathRaw: string, kind: SessionSqliteMigrationMoveKind) => {
+    if (capturedSources && !capturedSources.has(canonicalMigrationFilePath(sourcePathRaw))) {
+      return;
+    }
     const move = planSessionJsonlArchiveMove({
       archiveKey: sessionKey,
       baseNameRaw: path.basename(sourcePathRaw),
