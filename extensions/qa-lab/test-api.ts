@@ -1,6 +1,17 @@
-// QA Lab test API exposes evidence fixtures without loading runtime entrypoints.
+// QA Lab test API exposes evidence helpers without loading runtime entrypoints.
 export { qaProfileEvidencePlan } from "./src/profile-evidence-plan.js";
 export {
   qaMaturityTaxonomyIdentity,
   readQaMaturityTaxonomySource,
 } from "./src/scorecard-taxonomy.js";
+export {
+  buildScriptEvidenceSummary,
+  QA_EVIDENCE_FILENAME,
+  type QaEvidencePackageSource,
+  type QaEvidenceStatus,
+  type QaEvidenceSummaryJson,
+  validateQaEvidenceSummaryJson,
+} from "./src/evidence-summary.js";
+export { splitQaModelRef } from "./src/model-selection.js";
+export type { QaProviderMode } from "./src/providers/index.js";
+export { readQaScenarioById, type QaSeedScenarioWithSource } from "./src/scenario-catalog.js";
