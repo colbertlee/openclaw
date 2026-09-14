@@ -279,6 +279,7 @@ export const en: TranslationMap & {
     },
   },
   githubPreview: {
+    cached: "Cached details",
     coAuthors: "Co-authored by {logins}",
     loading: "Loading GitHub details…",
     unavailable: "GitHub preview unavailable",
@@ -296,6 +297,7 @@ export const en: TranslationMap & {
     pullRequest: "pull request",
     issue: "issue",
     ariaLabel: "{state} {kind} {repo} #{number}: {title}, by {author}",
+    ariaLabelWithoutAuthor: "{state} {kind} {repo} #{number}: {title}",
   },
   sessionHovercard: {
     ariaLabel: "Session information",
@@ -2955,6 +2957,7 @@ export const en: TranslationMap & {
     recapUpdating: "Updating recap…",
     recapStale: "New activity since this recap",
     recapUnavailable: "Recap unavailable",
+    recapRefreshFailed: "Couldn’t refresh recap",
     recapRetry: "Retry recap",
     recapUpdated: "Recap updated {time}",
     backToSessions: "Back to sessions",
