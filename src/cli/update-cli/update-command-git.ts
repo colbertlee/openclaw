@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { readRegularFile, sameFileIdentity } from "@openclaw/fs-safe/advanced";
+import { sameFileIdentity } from "../../infra/fs-safe-advanced.js";
+import { readRegularFile } from "../../infra/fs-safe.js";
 import type { PackageUpdateTransaction } from "../../infra/package-update-steps.js";
 import { hasNodeErrorCode } from "../../infra/path-guards.js";
 import { mergeProcessEnv } from "../../infra/process-env.js";
