@@ -152,7 +152,7 @@ type CronProps = {
     cronRunsQuery?: string;
     cronRunsSortDir?: CronSortDir;
   }) => void | Promise<void>;
-  onNavigateToChat?: (sessionKey: string) => void;
+  onViewRunTranscript?: (entry: CronRunLogEntry) => void;
 };
 
 // ── Shared option helpers ──
