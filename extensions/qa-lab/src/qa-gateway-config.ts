@@ -289,6 +289,16 @@ export function buildQaGatewayConfig(params: {
       // environment defaults to a messaging-only profile.
       profile: "coding",
     },
+    ...(transportPluginIds.includes("qa-channel")
+      ? {
+          commands: {
+            // Restart notices are re-authorized after the plugin registry has
+            // been torn down. Retain both sender and routable target forms so
+            // the fallback owner check remains exact across that boundary.
+            ownerAllowFrom: ["qa-channel:qa-operator", "qa-channel:dm:qa-operator"],
+          },
+        }
+      : {}),
     ...(gatewayModels
       ? {
           models: {
