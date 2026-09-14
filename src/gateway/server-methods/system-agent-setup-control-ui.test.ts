@@ -18,6 +18,7 @@ const fixture = vi.hoisted(() => ({
   config: {} as OpenClawConfig,
   exists: false,
   additionalCatalog: false,
+  providerCapabilities: false,
 }));
 vi.mock("../../config/config.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../config/config.js")>()),
@@ -35,16 +36,35 @@ vi.mock("../../config/config.js", async (importOriginal) => ({
       legacyIssues: [],
     }),
     pluginMetadataSnapshot: createPluginMetadataSnapshotFixture({
-      plugins: fixture.additionalCatalog
+      plugins: fixture.providerCapabilities
         ? [
             {
-              id: "fixture-catalog",
+              id: "search-only",
+              setup: { providers: [{ id: "search-only", authMethods: ["api-key"] }] },
+              contracts: { webSearchProviders: ["search-only"] },
+            },
+            {
+              id: "mixed",
+              providers: ["mixed-model"],
               setup: {
-                nativeSessionCatalog: { label: "Fixture archive", legacyDefaultEnabled: true },
+                providers: [
+                  { id: "mixed-model", authMethods: ["api-key"] },
+                  { id: "mixed-search", authMethods: ["api-key"] },
+                ],
               },
+              contracts: { webSearchProviders: ["mixed-search"] },
             },
           ]
-        : [],
+        : fixture.additionalCatalog
+          ? [
+              {
+                id: "fixture-catalog",
+                setup: {
+                  nativeSessionCatalog: { label: "Fixture archive", legacyDefaultEnabled: true },
+                },
+              },
+            ]
+          : [],
     }),
   }),
 }));
@@ -59,7 +79,6 @@ vi.mock("../../system-agent/setup-inference.js", () => ({
     const { detectSetupInference } = await import("../../system-agent/setup-inference-detect.js");
     return detectSetupInference(
       {
-        resolveManifestProviderAuthChoices: () => [],
         detectInferenceBackends: async () => [],
         probeLocalCommand: async (command) => ({ command, found: false }),
       },
@@ -88,6 +107,7 @@ describe("selected-agent Gateway detection and Model Setup consent", () => {
     "upgrade",
     "authored",
     "additional-catalog",
+    "provider-capabilities",
   ] as const)(
     "uses server-owned first-install evidence for %s selected-agent setup",
     async (state) => {
@@ -96,6 +116,7 @@ describe("selected-agent Gateway detection and Model Setup consent", () => {
       };
       fixture.exists = state !== "unwritten";
       fixture.additionalCatalog = state === "additional-catalog";
+      fixture.providerCapabilities = state === "provider-capabilities";
       fixture.config =
         state === "unwritten"
           ? {}
@@ -155,6 +176,11 @@ describe("selected-agent Gateway detection and Model Setup consent", () => {
       }
       if (fixture.additionalCatalog) {
         expect(page.textContent).toContain("Fixture archive");
+      }
+      if (fixture.providerCapabilities) {
+        expect(page.querySelector('[data-auth-choice="mixed-model-api-key"]')).not.toBeNull();
+        expect(page.querySelector('[data-auth-choice="search-only-api-key"]')).toBeNull();
+        expect(page.querySelector('[data-auth-choice="mixed-search-api-key"]')).toBeNull();
       }
       page.querySelector<HTMLButtonElement>('[data-auth-choice="custom-api-key"] button')!.click();
       await waitForFast(() =>
