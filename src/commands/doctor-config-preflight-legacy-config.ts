@@ -2,19 +2,62 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { note } from "../../packages/terminal-core/src/note.js";
 import { formatCliCommand } from "../cli/command-format.js";
+import { resolveFutureConfigActionBlock } from "../config/future-version-guard.js";
 import {
   parseConfigJson5,
   recoverConfigFromJsonRootSuffix,
   recoverConfigFromLastKnownGood,
   type ConfigSnapshotReadMeasure,
 } from "../config/io.js";
-import { resolveCanonicalConfigPath } from "../config/paths.js";
+import { resolveCanonicalConfigPath, resolveIsConfigReadOnly } from "../config/paths.js";
 import { inspectShippedPluginInstallConfigRecords } from "../config/plugin-install-config-migration.js";
 import type { ConfigFileSnapshot } from "../config/types.js";
 import { formatErrorMessage } from "../infra/errors.js";
+import type { PluginMetadataSnapshotScopeRunner } from "../plugins/current-plugin-metadata-snapshot.js";
+import { loadInstalledPluginIndexInstallRecordsSync } from "../plugins/installed-plugin-index-records.js";
 import { resolveHomeDir } from "../utils.js";
-import type { DoctorConfigPreflightPluginSnapshotRead } from "./doctor-config-preflight-plugin-index.js";
-import type { planAutomaticConfigRepair } from "./doctor/shared/automatic-startup-config-repair.js";
+import {
+  shouldSkipPluginValidationForDoctorConfigPreflight,
+  type DoctorConfigPreflightPluginSnapshotRead,
+} from "./doctor-config-preflight-plugin-index.js";
+import { planAutomaticConfigRepair } from "./doctor/shared/automatic-startup-config-repair.js";
+import type { DoctorConfigPreflightOptions } from "./doctor/shared/config-migration-result.js";
+
+export function createDoctorConfigRepairPlanner(params: {
+  options: DoctorConfigPreflightOptions;
+  gatewayStartupCheckpointRequired: boolean;
+  stateMigrationsRequested: boolean;
+  skipLegacyParentConfigWrite: boolean;
+  hasImportedPluginConfig: () => boolean;
+  runWithPluginMetadataSnapshot: PluginMetadataSnapshotScopeRunner;
+}) {
+  const planScopedConfigRepair = (snapshot: ConfigFileSnapshot) => {
+    // Read in the caller's lease cache before entering a retained Doctor metadata scope.
+    const installRecords = params.hasImportedPluginConfig()
+      ? loadInstalledPluginIndexInstallRecordsSync()
+      : undefined;
+    return params.runWithPluginMetadataSnapshot(
+      { config: snapshot.sourceConfig ?? snapshot.config ?? {} },
+      () => planAutomaticConfigRepair(snapshot, { installRecords }),
+    );
+  };
+  const planAdmittedConfigRepair = (
+    snapshot: ConfigFileSnapshot,
+    prepared: ReturnType<typeof planAutomaticConfigRepair> = null,
+  ) =>
+    (params.gatewayStartupCheckpointRequired ||
+      params.options.repairPrefixedConfig === true ||
+      (params.stateMigrationsRequested && params.options.migrateLegacyConfig !== false)) &&
+    !snapshot.valid &&
+    !params.skipLegacyParentConfigWrite &&
+    (params.options.repairPrefixedConfig === true ||
+      !shouldSkipPluginValidationForDoctorConfigPreflight()) &&
+    !resolveIsConfigReadOnly(process.env) &&
+    !resolveFutureConfigActionBlock({ action: "normalize legacy config", snapshot })
+      ? (prepared ?? planScopedConfigRepair(snapshot))
+      : null;
+  return { planScopedConfigRepair, planAdmittedConfigRepair };
+}
 
 export function createDoctorLegacyConfigMigration(params: {
   enabled: boolean;
