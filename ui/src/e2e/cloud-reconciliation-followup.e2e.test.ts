@@ -19,7 +19,8 @@ function placement(state: "active" | "failed", workspaceResultReconciling = fals
     createdAtMs: now - 180_000,
     generation: state === "failed" ? 3 : 2,
     stateChangedAtMs: now - 138_000,
-    updatedAtMs: now,
+    // Run events advance the mock row; later transitions must not carry older timestamps.
+    updatedAtMs: Date.now(),
   };
   if (state === "failed") {
     return {
@@ -49,16 +50,17 @@ function session(
   workspaceResultReconciling = false,
   runId = "follow-up-run",
 ) {
+  const currentPlacement = placement(state, workspaceResultReconciling);
   return {
     activeRunIds: queuedFollowUp ? [runId] : [],
     hasActiveRun: queuedFollowUp,
     key: sessionKey,
     kind: "direct",
     label: "Cloud reconciliation proof",
-    placement: placement(state, workspaceResultReconciling),
+    placement: currentPlacement,
     sessionId: "cloud-reconciliation-session",
     status: queuedFollowUp ? "running" : "done",
-    updatedAt: now,
+    updatedAt: currentPlacement.updatedAtMs,
   };
 }
 
