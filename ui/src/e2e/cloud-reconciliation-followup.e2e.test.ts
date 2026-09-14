@@ -14,12 +14,16 @@ const suite = createChatFlowE2eSuite();
 const sessionKey = "agent:main:cloud-reconciliation";
 const now = Date.now();
 
-function placement(state: "active" | "failed", workspaceResultReconciling = false) {
+function placement(
+  state: "active" | "failed",
+  updatedAtMs: number,
+  workspaceResultReconciling = false,
+) {
   const timing = {
     createdAtMs: now - 180_000,
     generation: state === "failed" ? 3 : 2,
     stateChangedAtMs: now - 138_000,
-    updatedAtMs: now,
+    updatedAtMs,
   };
   if (state === "failed") {
     return {
@@ -49,16 +53,18 @@ function session(
   workspaceResultReconciling = false,
   runId = "follow-up-run",
 ) {
+  // Terminal events advance the mock's canonical row clock between snapshots.
+  const updatedAt = Date.now();
   return {
     activeRunIds: queuedFollowUp ? [runId] : [],
     hasActiveRun: queuedFollowUp,
     key: sessionKey,
     kind: "direct",
     label: "Cloud reconciliation proof",
-    placement: placement(state, workspaceResultReconciling),
+    placement: placement(state, updatedAt, workspaceResultReconciling),
     sessionId: "cloud-reconciliation-session",
     status: queuedFollowUp ? "running" : "done",
-    updatedAt: now,
+    updatedAt,
   };
 }
 
