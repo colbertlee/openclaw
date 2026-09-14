@@ -25,9 +25,13 @@ import { appendSkillProposalEvent } from "../skills/workshop/store-sqlite-event.
 import { importLegacySkillProposal } from "../skills/workshop/store.js";
 import { writeConfigMachineState } from "../state/config-machine-state-write.js";
 import { readConfigMachineState } from "../state/config-machine-state.js";
-import { closeOpenClawStateDatabaseByPath } from "../state/openclaw-state-db-cache.js";
+import {
+  closeOpenClawStateDatabaseByPath,
+  closeOpenClawStateDatabaseByPathAsync,
+} from "../state/openclaw-state-db-cache.js";
 import { withExistingOpenClawStateDatabaseReadOnly } from "../state/openclaw-state-db-readonly.js";
 import {
+  closeOpenClawStateDatabaseAsync,
   closeOpenClawStateDatabaseForTest,
   openOpenClawStateDatabase,
 } from "../state/openclaw-state-db.js";
@@ -84,7 +88,8 @@ describe("doctor lint state isolation", () => {
     mocks.sqliteOpen.mockClear();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await closeOpenClawStateDatabaseAsync();
     closeOpenClawStateDatabaseForTest();
     restoreEnv(originalEnv);
   });
@@ -782,13 +787,14 @@ describe("doctor lint state isolation", () => {
     process.env.OPENCLAW_STATE_DIR = stateDir;
     fs.mkdirSync(stateDir, { recursive: true });
     fs.writeFileSync(configPath, "{}\n");
-    await createMcpOAuthClientProvider({ identity }).saveTokens({
+    const provider = await createMcpOAuthClientProvider({ identity });
+    await provider.saveTokens({
       access_token: "stored-inspection-token-not-real",
       token_type: "Bearer",
       expires_in: 3600,
     });
     const databasePath = resolveOpenClawStateSqlitePath(process.env);
-    closeOpenClawStateDatabaseByPath(databasePath);
+    await closeOpenClawStateDatabaseByPathAsync(databasePath);
     const lock = new DatabaseSync(databasePath);
     lock.exec("BEGIN IMMEDIATE");
     const before = snapshotDoctorLintSqliteFamily(databasePath);
@@ -827,7 +833,7 @@ describe("doctor lint state isolation", () => {
       stdout.mockRestore();
       lock.exec("ROLLBACK");
       lock.close();
-      closeOpenClawStateDatabaseByPath(databasePath);
+      await closeOpenClawStateDatabaseByPathAsync(databasePath);
       fs.rmSync(rootDir, { recursive: true, force: true });
     }
   });

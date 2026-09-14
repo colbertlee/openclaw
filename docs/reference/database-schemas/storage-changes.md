@@ -63,6 +63,16 @@ Classified database errors survive transport, and canonical close joins worker
 operations and native cleanup. Cold registry restoration and runtime-configuration
 preparation still retain their existing main-thread behavior.
 
+MCP OAuth storage reads, pending callback lookup, and requester counts run in the
+shared-state worker. Provider creation prepares the redirect facts required by
+the SDK's synchronous metadata getters; its credential and discovery callbacks
+await fresh storage reads. An earlier read cannot replace metadata acknowledged
+by a later write. If a write reports an error after a possible commit, the
+provider requires an acknowledged read before serving metadata again. Status
+and inventory reads do not create state. Lease validation and mutations retain
+their native owners and captured store context until their complete lifecycle
+moves off the application thread.
+
 Model-context reads and session transcript preparation use the session-transcript
 worker with separate bounded queues. Background preparation cannot occupy the
 foreground context queue. Session exports read events, statistics, and session

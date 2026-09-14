@@ -1,4 +1,11 @@
 import {
+  countMcpOAuthPrincipalsInDatabase,
+  listMcpOAuthStoreKeysInDatabase,
+  readMcpOAuthPendingInDatabase,
+  readMcpOAuthStoreIfPresentInDatabase,
+  readMcpOAuthStoreInDatabase,
+} from "../agents/mcp-oauth-store.kernel.js";
+import {
   patchConfigHealthEntryInDatabase,
   readConfigHealthSnapshotInDatabase,
 } from "../config/io.health-state.kernel.js";
@@ -120,6 +127,39 @@ function createSharedStateWorkerBackend(
     execute(command) {
       if (closed) {
         throw new Error("Shared-state worker is closed");
+      }
+      if (command.type === "mcpOAuth.read") {
+        return readMcpOAuthStoreInDatabase(open().db, command.input);
+      }
+      if (command.type === "mcpOAuth.readOnly") {
+        return (
+          withExistingOpenClawStateDatabaseReadOnly(
+            ({ db }) => readMcpOAuthStoreIfPresentInDatabase(db, command.input),
+            { path: context.databasePath, env: getSqliteWorkerStateContext().environment },
+          ) ?? {}
+        );
+      }
+      if (command.type === "mcpOAuth.keys") {
+        return (
+          withExistingOpenClawStateDatabaseReadOnly(
+            ({ db }) => listMcpOAuthStoreKeysInDatabase(db, command.input),
+            { path: context.databasePath, env: getSqliteWorkerStateContext().environment },
+          ) ?? []
+        );
+      }
+      if (command.type === "mcpOAuth.pending") {
+        return withExistingOpenClawStateDatabaseReadOnly(
+          ({ db }) => readMcpOAuthPendingInDatabase(db, command.input),
+          { path: context.databasePath, env: getSqliteWorkerStateContext().environment },
+        );
+      }
+      if (command.type === "mcpOAuth.countPrincipals") {
+        return (
+          withExistingOpenClawStateDatabaseReadOnly(
+            ({ db }) => countMcpOAuthPrincipalsInDatabase(db, command.input),
+            { path: context.databasePath, env: getSqliteWorkerStateContext().environment },
+          ) ?? 0
+        );
       }
       if (command.type === "tasks.statusSummary") {
         const read = () =>

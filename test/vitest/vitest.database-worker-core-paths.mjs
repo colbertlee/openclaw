@@ -3,7 +3,15 @@ export const databaseWorkerCoreTestFiles = [
   "src/agents/agent-tools.at-prefixed-remote-paths.test.ts",
   "src/agents/agent-tools.create-openclaw-coding-tools.test.ts",
   "src/agents/memory-write-provenance.test.ts",
+  "src/agents/mcp-config-mutation.test.ts",
+  "src/agents/mcp-oauth-provider.read.test.ts",
+  "src/agents/mcp-oauth-refresh-issuer.test.ts",
+  "src/agents/mcp-oauth-refresh.test.ts",
+  "src/agents/mcp-oauth-store.test.ts",
+  "src/agents/mcp-oauth.test.ts",
   "src/agents/subagents/completion/subagent-completion-admission.store.test.ts",
+  "src/cli/mcp-cli.oauth-integration.test.ts",
+  "src/cli/mcp-cli.oauth.test.ts",
   "src/commands/doctor-maintenance.worker.test.ts",
   "src/memory/memory-artifact-provenance.test.ts",
   "src/plugin-sdk/memory-host-core.test.ts",
@@ -29,8 +37,9 @@ export const databaseWorkerCoreTestFiles = [
 
 const databaseWorkerCoreTestFileSet = new Set(databaseWorkerCoreTestFiles);
 
-// Preserve watch admission for the two consumers previously inferred into fast lanes.
+// Preserve watch admission for consumers previously inferred into fast lanes.
 export const databaseWorkerCoreFormerFastKinds = new Map([
+  ["src/agents/mcp-oauth-store.test.ts", "unitFast"],
   ["src/plugin-sdk/memory-host-events.test.ts", "unitFastFakeTimers"],
   ["src/plugin-sdk/outbound-media.bulk.test.ts", "unitFast"],
 ]);

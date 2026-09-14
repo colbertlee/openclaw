@@ -1,3 +1,4 @@
+import type { McpOAuthReadOperations } from "../agents/mcp-oauth-store.kernel.js";
 import type { ConfigHealthPatch } from "../config/io.health-state.kernel.js";
 import type {
   ConfigHealthSnapshot,
@@ -41,7 +42,8 @@ type TaskFlowReadQuery = {
 
 /** Commands share one physical shared-state actor; bindings belong to commands, not open input. */
 export type OpenClawStateWorkerOperations = UserPreferenceWorkerOperations &
-  SessionDeliveryWorkerOperations & {
+  SessionDeliveryWorkerOperations &
+  McpOAuthReadOperations & {
     "tasks.statusSummary": {
       input: { now: number; preserveSourceArtifacts: boolean };
       output: TaskRegistryStatusSnapshot | undefined;
