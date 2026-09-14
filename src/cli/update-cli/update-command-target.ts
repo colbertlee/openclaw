@@ -15,6 +15,7 @@ import {
   resolveExtendedStablePackage,
   resolveNpmChannelTag,
 } from "../../infra/update-check.js";
+import { createFreeBsdPkgOwnershipInspection } from "../../infra/update-freebsd-pkg-ownership.js";
 import {
   canResolveRegistryVersionForPackageTarget,
   createGlobalInstallEnv,
@@ -75,6 +76,9 @@ export async function resolveUpdateCommandTarget(
     controlPlaneUpdateSentinelMeta,
     timeoutMs,
   } = prepared;
+  // Initialization and confirmations can outlive the earlier admission snapshot.
+  const pkgOwnership = createFreeBsdPkgOwnershipInspection(updateStepTimeoutMs);
+  await pkgOwnership.assertUnowned(discoveredRoot);
   let { devTarget } = prepared;
   let root = discoveredRoot;
   let updateInstallKind = installKind;
@@ -181,7 +185,9 @@ export async function resolveUpdateCommandTarget(
 
   if (updateInstallKind === "package") {
     const servicePlan =
-      prepared.servicePlan ?? (await resolveManagedServicePackageUpdatePlan({ root }));
+      prepared.servicePlan ??
+      (await resolveManagedServicePackageUpdatePlan({ root, pkgOwnership }));
+    await pkgOwnership.assertUnowned(servicePlan.rootRedirect?.root ?? root);
     managedServiceRootRedirect = servicePlan.rootRedirect;
     managedServiceNodeRunner = servicePlan.nodeRunner;
     if (managedServiceRootRedirect) {
@@ -217,6 +223,7 @@ export async function resolveUpdateCommandTarget(
         root,
         installKind,
         timeoutMs: updateStepTimeoutMs,
+        pkgOwnership,
       }).catch(async (error: unknown) => {
         if (!(error instanceof UpdatePreMutationError)) {
           throw error;
@@ -242,6 +249,7 @@ export async function resolveUpdateCommandTarget(
         honorPackageRoot:
           managedServiceRootRedirect !== null || managedServiceNodeRunner !== undefined,
         packageName: installedPackageName,
+        pkgOwnership,
       });
       const diskWarning = createLowDiskSpaceWarning({
         targetPath: packageInstallTarget.packageRoot
