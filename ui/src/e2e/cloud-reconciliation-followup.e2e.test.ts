@@ -177,7 +177,12 @@ suite.define(() => {
         };
         await gateway.setMethodResponse("chat.history", activeHistory);
         await gateway.setSessionsListResponse(chatSessionListResponse([active]));
-        await gateway.emitGatewayEvent("sessions.changed", { reason: "placement" });
+        // Placement notifications target one session, just like the Gateway publisher.
+        await gateway.emitGatewayEvent("sessions.changed", {
+          agentId: "main",
+          reason: "placement",
+          sessionKey,
+        });
         await gateway.emitGatewayEvent("session.message", {
           activeRunIds: [],
           hasActiveRun: false,
@@ -210,7 +215,11 @@ suite.define(() => {
         const failed = session("failed");
         await gateway.setMethodResponse("chat.history", { ...activeHistory, sessionInfo: failed });
         await gateway.setSessionsListResponse(chatSessionListResponse([failed]));
-        await gateway.emitGatewayEvent("sessions.changed", { reason: "placement" });
+        await gateway.emitGatewayEvent("sessions.changed", {
+          agentId: "main",
+          reason: "placement",
+          sessionKey,
+        });
         await page.getByText("Runner failed", { exact: true }).waitFor();
         await page
           .getByText("Workspace reconciliation failed: local worktree is locked.", { exact: false })
