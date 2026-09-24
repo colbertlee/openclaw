@@ -19,9 +19,14 @@ OpenClaw and other runtime adapters. `openclaw mcp list`, `show`, `set`, and
 requires [`uv`/`uvx`](https://docs.astral.sh/uv/getting-started/installation/).
 
 > **Note:** The legacy `npx -y @modelcontextprotocol/server-fetch` package was
-> removed from npm and no longer resolves. If your `mcp.servers.fetch` config
-> still references it, switch to `uvx mcp-server-fetch` (shown below) or pick
-> another currently-published `@modelcontextprotocol/*` server.
+> removed from npm and no longer resolves. If your `mcp.servers.<name>` config
+> still references it — under any saved name such as `fetch`, `docs`,
+> `DocsServer`, or `web-fetch` — switch the entry to
+> `uvx mcp-server-fetch` (shown below) or pick another currently-published
+> `@modelcontextprotocol/*` server. After updating, restart the gateway so the
+> runtime re-reads the saved MCP entry; running `openclaw mcp show <name>`
+> should report `command: uvx` and `args: [mcp-server-fetch]`, and the Fetch
+> tools should appear in the next agent tool discovery.
 > See [openclaw/openclaw#141180](https://github.com/openclaw/openclaw/issues/141180)
 > for the original report.
 
